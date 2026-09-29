@@ -44,7 +44,10 @@ pub(crate) fn args<'a, 'b>() -> Vec<Arg<'a, 'b>> {
             .takes_value(true)
             .value_name("APP_PROFILE_ID")
             .default_value(DEFAULT_BIGTABLE_APP_PROFILE_ID)
-            .help("Bigtable application profile id to use in requests"),
+            .help(
+                "Default Bigtable application profile id to use in requests. RPC clients can \
+                 override it per request with the `x-bigtable-app-profile-id` HTTP header",
+            ),
         Arg::with_name("rpc_bigtable_timeout")
             .long("rpc-bigtable-timeout")
             .value_name("SECONDS")

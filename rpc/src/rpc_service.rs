@@ -428,6 +428,51 @@ impl RequestMiddleware for RpcRequestMiddleware {
     }
 }
 
+/// Header that disables BigTable for a request when set to `disabled`.
+const X_BIGTABLE_HEADER: &str = "x-bigtable";
+/// Header that overrides the BigTable app profile id used for a request.
+const X_BIGTABLE_APP_PROFILE_ID_HEADER: &str = "x-bigtable-app-profile-id";
+const MAX_BIGTABLE_APP_PROFILE_ID_LEN: usize = 50;
+
+/// Accepts ids made of `[A-Za-z0-9_-]`, at most `MAX_BIGTABLE_APP_PROFILE_ID_LEN` long.
+fn is_valid_bigtable_app_profile_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_BIGTABLE_APP_PROFILE_ID_LEN
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+}
+
+/// Picks the request processor to use for a request based on its headers:
+/// - `x-bigtable: disabled` serves the request without BigTable. This takes precedence over
+///   `x-bigtable-app-profile-id`.
+/// - `x-bigtable-app-profile-id: <id>` serves the request with BigTable requests sent under the
+///   given app profile. A missing, malformed or invalid value leaves the configured profile.
+fn select_request_processor(
+    processor: &JsonRpcRequestProcessor,
+    headers: &hyper::HeaderMap,
+) -> JsonRpcRequestProcessor {
+    if headers
+        .get(X_BIGTABLE_HEADER)
+        .is_some_and(|v| v == "disabled")
+    {
+        return processor.clone_without_bigtable();
+    }
+
+    match headers.get(X_BIGTABLE_APP_PROFILE_ID_HEADER) {
+        Some(value) => match value.to_str() {
+            Ok(id) if is_valid_bigtable_app_profile_id(id) => {
+                processor.clone_with_bigtable_app_profile_id(id)
+            }
+            _ => {
+                debug!("Ignoring invalid {X_BIGTABLE_APP_PROFILE_ID_HEADER} header");
+                processor.clone()
+            }
+        },
+        None => processor.clone(),
+    }
+}
+
 fn match_supply_path(path: &str) -> Option<&str> {
     match path {
         "/v0/circulating-supply" | "/v0/total-supply" => Some(path),
@@ -751,12 +796,7 @@ impl JsonRpcService {
                 let server = ServerBuilder::with_meta_extractor(
                     io,
                     move |req: &hyper::Request<hyper::Body>| {
-                        let xbigtable = req.headers().get("x-bigtable");
-                        if xbigtable.is_some_and(|v| v == "disabled") {
-                            request_processor.clone_without_bigtable()
-                        } else {
-                            request_processor.clone()
-                        }
+                        select_request_processor(&request_processor, req.headers())
                     },
                 )
                 .event_loop_executor(runtime.handle().clone())
@@ -865,6 +905,7 @@ mod tests {
             genesis_utils::{GenesisConfigInfo, create_genesis_config},
             get_tmp_ledger_path_auto_delete,
         },
+        solana_net_utils::SocketAddrSpace,
         solana_rpc_client_api::config::RpcContextConfig,
         solana_runtime::bank::Bank,
         solana_send_transaction_service::test_utils::create_client_for_tests,
@@ -1530,5 +1571,106 @@ mod tests {
                 });
             }
         }
+    }
+
+    const CONFIGURED_APP_PROFILE_ID: &str = "configured-profile";
+
+    fn processor_with_bigtable(runtime: &Runtime) -> JsonRpcRequestProcessor {
+        let _guard = runtime.enter();
+        let GenesisConfigInfo { genesis_config, .. } = create_genesis_config(100);
+        let bank = Bank::new_for_tests(&genesis_config);
+        let storage = solana_storage_bigtable::LedgerStorage::new_for_emulator(
+            "test-instance",
+            CONFIGURED_APP_PROFILE_ID,
+            "localhost:8086",
+            None,
+        )
+        .unwrap();
+        JsonRpcRequestProcessor::new_from_bank(bank, SocketAddrSpace::Unspecified)
+            .with_bigtable_ledger_storage(storage)
+    }
+
+    fn headers(pairs: &[(&'static str, &str)]) -> hyper::HeaderMap {
+        let mut headers = hyper::HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(*name, hyper::header::HeaderValue::from_str(value).unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn test_select_request_processor() {
+        let runtime = Runtime::new().unwrap();
+        let processor = processor_with_bigtable(&runtime);
+        let select = |pairs: &[(&'static str, &str)]| {
+            select_request_processor(&processor, &headers(pairs))
+                .bigtable_app_profile_id()
+                .map(str::to_string)
+        };
+
+        // No headers: configured profile
+        assert_eq!(select(&[]).as_deref(), Some(CONFIGURED_APP_PROFILE_ID));
+
+        // `x-bigtable: disabled` turns BigTable off; other values are ignored
+        assert_eq!(select(&[("x-bigtable", "disabled")]), None);
+        assert_eq!(
+            select(&[("x-bigtable", "enabled")]).as_deref(),
+            Some(CONFIGURED_APP_PROFILE_ID)
+        );
+
+        // Valid profile id header overrides the configured profile
+        assert_eq!(
+            select(&[("x-bigtable-app-profile-id", "other-profile_1")]).as_deref(),
+            Some("other-profile_1")
+        );
+
+        // Invalid values fall back to the configured profile
+        let too_long = "a".repeat(MAX_BIGTABLE_APP_PROFILE_ID_LEN + 1);
+        for invalid in ["", "has.dot", "has space", "slash/es", "ünïcode", &too_long] {
+            assert_eq!(
+                select(&[("x-bigtable-app-profile-id", invalid)]).as_deref(),
+                Some(CONFIGURED_APP_PROFILE_ID),
+                "{invalid:?}"
+            );
+        }
+        // Non-UTF-8 header value
+        let mut raw = hyper::HeaderMap::new();
+        raw.insert(
+            "x-bigtable-app-profile-id",
+            hyper::header::HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+        );
+        assert_eq!(
+            select_request_processor(&processor, &raw)
+                .bigtable_app_profile_id()
+                .unwrap(),
+            CONFIGURED_APP_PROFILE_ID
+        );
+
+        // `x-bigtable: disabled` wins over a profile override
+        assert_eq!(
+            select(&[
+                ("x-bigtable", "disabled"),
+                ("x-bigtable-app-profile-id", "other"),
+            ]),
+            None
+        );
+
+        // The original processor is unaffected by per-request overrides
+        assert_eq!(
+            processor.bigtable_app_profile_id(),
+            Some(CONFIGURED_APP_PROFILE_ID)
+        );
+    }
+
+    #[test]
+    fn test_select_request_processor_without_bigtable() {
+        let genesis = create_genesis_config(100);
+        let bank = Bank::new_for_tests(&genesis.genesis_config);
+        let processor = JsonRpcRequestProcessor::new_from_bank(bank, SocketAddrSpace::Unspecified);
+        let selected = select_request_processor(
+            &processor,
+            &headers(&[("x-bigtable-app-profile-id", "other")]),
+        );
+        assert_eq!(selected.bigtable_app_profile_id(), None);
     }
 }

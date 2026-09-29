@@ -269,6 +269,37 @@ impl JsonRpcRequestProcessor {
             ..self.clone()
         }
     }
+
+    /// Clones the processor with its BigTable storage (if any) sending requests under
+    /// `app_profile_id` instead of the configured one.
+    pub fn clone_with_bigtable_app_profile_id(
+        &self,
+        app_profile_id: &str,
+    ) -> JsonRpcRequestProcessor {
+        Self {
+            bigtable_ledger_storage: self
+                .bigtable_ledger_storage
+                .as_ref()
+                .map(|storage| storage.with_app_profile_id(app_profile_id)),
+            ..self.clone()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_bigtable_ledger_storage(
+        mut self,
+        bigtable_ledger_storage: solana_storage_bigtable::LedgerStorage,
+    ) -> Self {
+        self.bigtable_ledger_storage = Some(bigtable_ledger_storage);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bigtable_app_profile_id(&self) -> Option<&str> {
+        self.bigtable_ledger_storage
+            .as_ref()
+            .map(|storage| storage.app_profile_id())
+    }
 }
 
 impl JsonRpcRequestProcessor {

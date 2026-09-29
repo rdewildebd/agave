@@ -21,6 +21,11 @@ Release channels have their own copy of this changelog:
 
 #### Changes
 
+* RPC requests can now select the Bigtable application profile they are served with via the
+  `x-bigtable-app-profile-id` HTTP header, overriding `--rpc-bigtable-app-profile-id` (which
+  remains the default) for that request. Missing or invalid values fall back to the default, and
+  `x-bigtable: disabled` still takes precedence.
+
 ### Validator
 
 #### Breaking

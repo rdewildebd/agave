@@ -643,6 +643,20 @@ impl LedgerStorage {
         Ok(Self { stats, connection })
     }
 
+    /// Returns a `LedgerStorage` that shares this one's connection and stats but sends Bigtable
+    /// requests with `app_profile_id` instead of the configured one.
+    pub fn with_app_profile_id(&self, app_profile_id: &str) -> Self {
+        Self {
+            connection: self.connection.with_app_profile_id(app_profile_id),
+            stats: Arc::clone(&self.stats),
+        }
+    }
+
+    /// The application profile id that Bigtable requests are sent with.
+    pub fn app_profile_id(&self) -> &str {
+        self.connection.app_profile_id()
+    }
+
     pub async fn new_with_stringified_credential(credential: String) -> Result<Self> {
         Self::new_with_config(LedgerStorageConfig {
             credential_type: CredentialType::Stringified(credential),
