@@ -272,6 +272,19 @@ impl BigTableConnection {
         })
     }
 
+    /// Returns a connection that shares this one's channel and credentials but sends requests
+    /// with `app_profile_id` instead.
+    pub fn with_app_profile_id(&self, app_profile_id: &str) -> Self {
+        Self {
+            app_profile_id: app_profile_id.to_string(),
+            ..self.clone()
+        }
+    }
+
+    pub fn app_profile_id(&self) -> &str {
+        &self.app_profile_id
+    }
+
     /// Create a new BigTable client.
     ///
     /// Clients require `&mut self`, due to `Tonic::transport::Channel` limitations, however
